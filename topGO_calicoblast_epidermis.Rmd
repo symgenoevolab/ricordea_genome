@@ -1,5 +1,5 @@
 ---
-title: "GO enrichment (topGO) — Calicoblast & Epidermis"
+title: "GO enrichment (topGO) — Calicoblast and Epidermis"
 ---
 
 ```{r libraries}

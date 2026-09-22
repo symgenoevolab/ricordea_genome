@@ -1,0 +1,269 @@
+---
+title: "Calicoblast marker gene detectability under subsampling"
+---
+
+```{r setup, message=FALSE, warning=FALSE}
+library(Seurat)
+library(SeuratObject)
+library(Matrix)
+library(dplyr)
+library(purrr)
+library(ggplot2)
+library(scales)
+set.seed(42)
+```
+
+## Overview
+
+We ask: at what cell count does the calicoblast marker gene signature become
+undetectable? Coral datasets are subsampled to decreasing cell numbers and
+UMI-downsampled to R. yuma's sequencing depth. The fraction of calicoblast
+marker genes detectable (total UMI across calicoblast cells > 10) is recorded
+across iterations. If marker genes remain detectable at R. yuma's cell count
+(9,822), their absence in R. yuma reflects a genuine biological difference.
+
+---
+
+## 1  Parameters
+
+```{r params}
+out_dir        <- "/calicoblast_markers"
+MARKER_DIR     <- "/calicoblast_markers"
+dir.create(out_dir, showWarnings = FALSE, recursive = TRUE)
+
+RYUMA_N_CELLS  <- 9822   # total cells in R. yuma
+RYUMA_MEAN_UMI <- 885.3  # mean nCount_RNA per cell in R. yuma
+
+N_ITER  <- 50   # iterations per cell-count point
+SWEEP_N <- c(200, 500, 1000, 2000, 3000, 5000, 7000, 8000, 9000, RYUMA_N_CELLS, 11000,
+             12000, 15000, 20000)
+
+SPECIES_INFO <- list(
+  Amil = list(
+    path        = "/Amil.seurat_final.rds",
+    ct_col      = "legacy_cell_type",
+    cali_label  = "calicoblast",
+    marker_file = file.path(MARKER_DIR, "Amil_calicoblast_markers.tsv")
+  ),
+  Spis = list(
+    path        = "/Spis.seurat_final.rds",
+    ct_col      = "legacy_cell_type",
+    cali_label  = "calicoblast",
+    marker_file = file.path(MARKER_DIR, "Spis_calicoblast_markers.tsv")
+  ),
+  Ocupat = list(
+    path        = "/Ocupat.seurat_final.rds",
+    ct_col      = "legacy_cell_type",
+    cali_label  = "calicoblast",
+    marker_file = file.path(MARKER_DIR, "Ocupat_calicoblast_markers.tsv")
+  )
+)
+
+sp_order   <- c("Amil", "Spis", "Ocupat")
+sp_colours <- c(Amil = "#E07B39", Spis = "#4A90D9", Ocupat = "#5BAD72")
+```
+
+---
+
+## 2  Load data
+
+```{r load-markers}
+marker_list <- lapply(SPECIES_INFO, function(info) {
+  df <- read.table(info$marker_file, sep = "\t", header = TRUE,
+                   stringsAsFactors = FALSE)
+  df$gene
+})
+
+cat("Marker gene counts:\n")
+for (sp in names(marker_list)) cat(" ", sp, ":", length(marker_list[[sp]]), "\n")
+```
+
+```{r load-seurat, cache=TRUE, message=FALSE, warning=FALSE}
+sobj_list <- lapply(SPECIES_INFO, function(info) readRDS(info$path))
+names(sobj_list) <- names(SPECIES_INFO)
+
+cat("Loaded species:\n")
+for (sp in names(sobj_list)) {
+  obj  <- sobj_list[[sp]]
+  info <- SPECIES_INFO[[sp]]
+  n    <- ncol(obj)
+  nc   <- sum(obj@meta.data[[info$ct_col]] == info$cali_label, na.rm = TRUE)
+  mu   <- mean(obj@meta.data[["nCount_RNA"]], na.rm = TRUE)
+  nm   <- length(intersect(marker_list[[sp]], rownames(obj[["RNA"]])))
+  cat(sprintf("  %-8s  %6d cells  %4d calicoblasts (%.1f%%)  mean UMI = %.0f  markers in matrix = %d\n",
+              sp, n, nc, 100 * nc / n, mu, nm))
+}
+```
+
+---
+
+## 3  Helper functions
+
+```{r helpers}
+# Downsample each cell to at most `target` UMIs (sampling without replacement)
+downsample_counts <- function(mat, target) {
+  target      <- as.integer(round(target))
+  mat         <- as(mat, "dgCMatrix")
+  mat@x       <- as.numeric(round(mat@x))
+  cell_totals <- Matrix::colSums(mat)
+  cells_to_ds <- which(cell_totals > target)
+  if (length(cells_to_ds) == 0) return(mat)
+
+  ng <- nrow(mat)
+  for (j in cells_to_ds) {
+    col       <- mat[, j]
+    nz        <- which(col > 0)
+    if (length(nz) == 0) next
+    molecules <- rep(nz, as.integer(col[nz]))
+    if (length(molecules) <= target) next
+    mat[, j]  <- tabulate(sample(molecules, target), nbins = ng)
+  }
+  mat
+}
+
+# One subsampling iteration: returns marker gene detection rate
+# (fraction of marker genes expressed in >= 1 calicoblast cell)
+one_iteration <- function(obj, info, markers, n_target, target_umi = RYUMA_MEAN_UMI) {
+  # Cell subsampling
+  idx      <- sample(ncol(obj), min(n_target, ncol(obj)))
+  sub_meta <- obj@meta.data[idx, , drop = FALSE]
+  cali_idx <- which(sub_meta[[info$ct_col]] == info$cali_label)
+
+  if (length(cali_idx) == 0) return(NA_real_)
+
+  cali_barcodes <- rownames(sub_meta)[cali_idx]
+  counts_all    <- obj[["RNA"]]$counts
+  valid_markers <- intersect(markers, rownames(counts_all))
+
+  if (length(valid_markers) == 0) return(NA_real_)
+
+  # UMI downsampling on calicoblast cells only
+  cali_mat <- downsample_counts(
+    counts_all[, cali_barcodes, drop = FALSE],
+    target_umi
+  )
+
+  # Fraction of marker genes expressed in >= 1 calicoblast cell
+  marker_mat       <- cali_mat[valid_markers, , drop = FALSE]
+  n_detectable     <- sum(Matrix::rowSums(marker_mat) > 10) # Threshold: total UMI across all calicoblast cells > 10
+  n_detectable / length(valid_markers)
+}
+```
+
+---
+
+## 4  Sweep analysis
+
+```{r sweep}
+sweep_cache <- file.path(out_dir, "sweep_v3_cache_UMI10.rds")
+
+if (file.exists(sweep_cache)) {
+  sweep_df <- readRDS(sweep_cache)
+  cat("Loaded from cache.\n")
+} else {
+  results <- list()
+
+  for (sp in names(sobj_list)) {
+    cat("Processing", sp, "...\n")
+    obj     <- sobj_list[[sp]]
+    info    <- SPECIES_INFO[[sp]]
+    markers <- marker_list[[sp]]
+    max_n   <- ncol(obj)
+
+    for (nc in SWEEP_N[SWEEP_N <= max_n]) {
+      rates <- sapply(seq_len(N_ITER), function(i) {
+        one_iteration(obj, info, markers, n_target = nc)
+      })
+      results[[paste0(sp, "__", nc)]] <- list(
+        species           = sp,
+        n_cells           = nc,
+        mean_detection    = mean(rates, na.rm = TRUE),
+        sd_detection      = sd(rates,   na.rm = TRUE),
+        n_cali_zero_frac  = mean(is.na(rates))  # fraction of iters with 0 calicoblasts
+      )
+    }
+  }
+
+  sweep_df <- map_dfr(results, function(x) {
+    tibble(
+      species          = x$species,
+      n_cells          = x$n_cells,
+      mean_detection   = x$mean_detection * 100,
+      sd_detection     = x$sd_detection   * 100,
+      n_cali_zero_frac = x$n_cali_zero_frac
+    )
+  }) %>% mutate(species = factor(species, levels = sp_order))
+
+  saveRDS(sweep_df, sweep_cache)
+  cat("Done. Saved to", sweep_cache, "\n")
+}
+
+sweep_df
+```
+
+---
+
+## 5  Figure
+
+```{r fig-sweep, fig.width=6, fig.height=4}
+p <- ggplot(sweep_df, aes(x = n_cells, y = mean_detection, colour = species,
+                           fill = species)) +
+  geom_errorbar(aes(ymin = pmax(mean_detection - sd_detection, 0),
+                    ymax = pmin(mean_detection + sd_detection, 100)),
+                width = 300,          
+                linewidth = 0.5,
+                alpha = 0.7) +
+  geom_line(linewidth = 0.5) +
+  geom_point(size = 2) +
+  geom_vline(xintercept = RYUMA_N_CELLS, linetype = "dashed",
+             colour = "grey40", linewidth = 0.5) +
+  annotate("text", x = RYUMA_N_CELLS * 1.04, y = 15,
+           label = paste0("R. yuma\n(", comma(RYUMA_N_CELLS), " cells)"),
+           hjust = 0, size = 2.8, colour = "grey30") +
+  scale_x_continuous(labels = label_comma()) +
+  scale_y_continuous(limits = c(0, 105), breaks = seq(0, 100, 20),
+                     labels = function(x) paste0(x, "%")) +
+  scale_colour_manual(values = sp_colours) +
+  scale_fill_manual(values = sp_colours) +
+  labs(
+    x      = "Cells subsampled",
+    y      = "Calicoblast marker genes detected",
+    colour = NULL,
+    fill   = NULL,
+    title  = "Marker gene detectability under subsampling",
+    subtitle = paste0("UMI downsampled to R. yuma mean (", round(RYUMA_MEAN_UMI), "/cell)  |  ",
+                      N_ITER, " iterations ± SD")
+  ) +
+  theme_classic(base_size = 11) +
+  theme(legend.position = "right") +
+  scale_x_continuous(labels = label_comma(),
+                   expand = c(0, 0)) +          
+scale_y_continuous(limits = c(0, 105), breaks = seq(0, 100, 20),
+                   labels = function(x) paste0(x, "%"),
+                   expand = c(0, 0))
+
+p
+```
+
+---
+
+## 6  Save
+
+```{r save}
+pdf(file.path(out_dir, "calicoblast_marker_detectability_UMI10.pdf"), width = 6, height = 4)
+print(p)
+dev.off()
+
+write.csv(sweep_df, file.path(out_dir, "calicoblast_marker_detectability_UMI10.csv"),
+          row.names = FALSE)
+
+cat("Saved to", out_dir, "\n")
+```
+
+---
+
+## Session info
+
+```{r session}
+sessionInfo()
+```

@@ -1,0 +1,450 @@
+---
+title: "TranscryptFormer: pan-calicoblast cosine similarity"
+---
+
+## Concept
+
+Calicoblast cells from all species that carry this annotation (Amil, Spis, Ocup,
+Gast) are pooled after per-species centering. The mean L2-normalised vector of
+this pool is the **pan-calicoblast centroid**. We then compute its cosine
+similarity against every cell-type centroid in every comparison species.
+
+A high similarity to a specific cell type in a non-skeletal species suggests a
+transcriptional homologue; a diffuse/low pattern suggests this cell identity is
+novel to Scleractinia.
+
+```{r libraries}
+library(anndata)
+library(ggplot2)
+library(dplyr)
+library(tidyr)
+library(pheatmap)
+library(RColorBrewer)
+```
+
+## Load embeddings
+
+```{r load-data}
+base_coral <- "/transcriptformer"
+base_other <- "/transcriptformer_other"
+
+adata_amil  <- read_h5ad(file.path(base_other, "Amil_inference/embeddings.h5ad"))
+adata_spis  <- read_h5ad(file.path(base_other, "Spis_inference/embeddings.h5ad"))
+adata_ocup  <- read_h5ad(file.path(base_other, "Ocupat_inference/embeddings.h5ad"))
+adata_gast  <- read_h5ad(file.path(base_coral, "Gast_inference/embeddings.h5ad"))
+adata_nve   <- read_h5ad(file.path(base_other, "Nve_inference/embeddings.h5ad"))
+adata_xsp   <- read_h5ad(file.path(base_other, "Xsp_inference/embeddings.h5ad"))
+adata_ryuma <- read_h5ad(file.path(base_coral, "Ryuma_inference/embeddings.h5ad"))
+
+emb_amil  <- adata_amil$obsm[["embeddings"]]
+emb_spis  <- adata_spis$obsm[["embeddings"]]
+emb_ocup  <- adata_ocup$obsm[["embeddings"]]
+emb_gast  <- adata_gast$obsm[["embeddings"]]
+emb_nve   <- adata_nve$obsm[["embeddings"]]
+emb_xsp   <- adata_xsp$obsm[["embeddings"]]
+emb_ryuma <- adata_ryuma$obsm[["embeddings"]]
+
+ct_amil  <- as.character(as.data.frame(adata_amil$obs)$cell_type)
+ct_spis  <- as.character(as.data.frame(adata_spis$obs)$cell_type)
+ct_ocup  <- as.character(as.data.frame(adata_ocup$obs)$cell_type)
+ct_gast  <- as.character(as.data.frame(adata_gast$obs)$cell_type)
+ct_nve   <- as.character(as.data.frame(adata_nve$obs)$cell_type)
+ct_xsp   <- as.character(as.data.frame(adata_xsp$obs)$cell_type)
+ct_ryuma <- as.character(as.data.frame(adata_ryuma$obs)$cell_type)
+```
+
+## Cluster merge maps
+
+```{r merge-maps}
+merge_ct <- function(labels, map) {
+  result <- map[labels]
+  unmapped <- is.na(result)
+  result[unmapped] <- labels[unmapped]
+  unname(result)
+}
+
+amil_map <- c(
+  calicoblast                = "calicoblast",
+  cnidocyte                  = "cnidocyte",
+  digestive_filaments        = "digestive_filaments",
+  epidermis                  = "epidermis",
+  epidermis_like_1           = "epidermis",
+  epidermis_like_2           = "epidermis",
+  gastrodermis_1             = "gastrodermis",
+  gastrodermis_2             = "gastrodermis",
+  gastrodermis_like          = "gastrodermis",
+  gastrodermis_mitotic       = "gastrodermis",
+  gastrodermis_muscle        = "gastrodermis",
+  gastrodermis_alga_hosting  = "alga_hosting_cell",
+  germline_oocytes           = "germline",
+  gland_1_Xbp                = "glands",
+  gland_2                    = "glands",
+  gland_3                    = "glands",
+  gland_4                    = "glands",
+  gland_5                    = "glands",
+  gland_6                    = "glands",
+  immune_like                = "immune_cell",
+  immune_macrophage_like_1   = "immune_cell",
+  immune_macrophage_like_2   = "immune_cell",
+  neuron_Isl_1               = "neuron",
+  neuron_Isl_2               = "neuron",
+  neuron_Pou4                = "neuron",
+  neuron_Pou4_Otp            = "neuron",
+  neurosecretory_progenitors = "neuron"
+)
+
+spis_map <- c(
+  calicoblast                = "calicoblast",
+  cnidocyte                  = "cnidocyte",
+  digestive_filaments        = "digestive_filaments",
+  epidermis                  = "epidermis",
+  gastrodermis               = "gastrodermis",
+  gastrodermis_like_2        = "gastrodermis",
+  gastrodermis_muscle        = "gastrodermis",
+  gastrodermis_alga_hosting  = "alga_hosting_cell",
+  germline_oocytes_1         = "germline",
+  germline_oocytes_2         = "germline",
+  gland_1_Xbp                = "glands",
+  gland_2                    = "glands",
+  gland_3                    = "glands",
+  immune_macrophage          = "immune_cell",
+  immune_macrophage_like_1   = "immune_cell",
+  immune_macrophage_like_2   = "immune_cell",
+  immune_nascent             = "immune_cell",
+  neuron_Atoh8               = "neuron",
+  neuron_Isl                 = "neuron",
+  neuron_Isl_Nkx6            = "neuron",
+  neuron_Pou4_1              = "neuron",
+  neuron_Pou4_2              = "neuron",
+  neuron_Pou4_Gsx            = "neuron",
+  neuron_Pou4_Otp            = "neuron",
+  neurosecretory_progenitors = "neuron"
+)
+
+ocup_map <- c(
+  calicoblast                = "calicoblast",
+  cnidocyte_1                = "cnidocyte",
+  cnidocyte_2                = "cnidocyte",
+  digestive_filaments        = "digestive_filaments",
+  epidermis                  = "epidermis",
+  epidermis_like_1           = "epidermis",
+  epidermis_like_2           = "epidermis",
+  gastrodermis               = "gastrodermis",
+  gastrodermis_like_1        = "gastrodermis",
+  gastrodermis_like_2        = "gastrodermis",
+  gastrodermis_muscle_like   = "gastrodermis",
+  gastrodermis_alga_hosting  = "alga_hosting_cell",
+  germline_oocytes           = "germline",
+  gland_1_Xbp                = "glands",
+  gland_2                    = "glands",
+  gland_3                    = "glands",
+  gland_4                    = "glands",
+  gland_5                    = "glands",
+  gland_6                    = "glands",
+  gland_7                    = "glands",
+  gland_8                    = "glands",
+  immune_like_1              = "immune_cell",
+  immune_like_2              = "immune_cell",
+  immune_macrophage_like     = "immune_cell",
+  neuron_Isl                 = "neuron",
+  neuron_Pou4_1              = "neuron",
+  neuron_Pou4_2              = "neuron",
+  neuron_Pou4_Gsx            = "neuron",
+  neuron_Pou4_Otp_1          = "neuron",
+  neuron_Pou4_Otp_2          = "neuron",
+  neurosecretory_progenitors = "neuron"
+)
+
+gast_map <- c(
+  "Algae_hosting_cells" = "alga_hosting_cell",
+  "Calicoblast"         = "calicoblast",
+  "Cnidocytes"          = "cnidocyte",
+  "Epidermis_1"         = "epidermis",
+  "Epidermis_2"         = "epidermis",
+  "Gastrodermis"        = "gastrodermis",
+  "Gland cells-like"    = "glands",
+  "Immune cells"        = "immune_cell",
+  "Neurons"             = "neuron",
+  "unknown"             = "unknown"
+)
+
+nve_map <- c(
+  cnidocyte_nematocytes                      = "cnidocyte",
+  cnidocyte_spirocytes                       = "cnidocyte",
+  digestive_filaments                        = "digestive_filaments",
+  digestive_filaments_like                   = "digestive_filaments",
+  epidermis                                  = "epidermis",
+  epidermis_like_1                           = "epidermis",
+  epidermis_like_2                           = "epidermis",
+  gastrodermis                               = "gastrodermis",
+  gastrodermis_muscle_parietal_circular_prog = "gastrodermis",
+  gland_1                                    = "glands",
+  gland_4                                    = "glands",
+  gland_9                                    = "glands",
+  gland_13                                   = "glands",
+  gland_16                                   = "glands",
+  gland_17                                   = "glands",
+  gland_26                                   = "glands",
+  gland_unknown_1                            = "glands",
+  muscle                                     = "glands",
+  neuron_10_vasopressin                      = "neuron",
+  neuron_13                                  = "neuron",
+  neuron_14_peptidergic                      = "neuron",
+  neuron_16_peptidergic                      = "neuron",
+  neuron_18                                  = "neuron",
+  neuron_19                                  = "neuron",
+  neuron_28_motor                            = "neuron",
+  neuron_2_precursors                        = "neuron",
+  neuron_30_peptidergic                      = "neuron",
+  neuron_36_peptidergic                      = "neuron",
+  neuron_4                                   = "neuron",
+  neuron_7                                   = "neuron",
+  neurosecretory_progenitors                 = "neuron",
+  unknown                                    = "unknown"
+)
+
+xsp_map <- c(
+  cnidocyte_1                = "cnidocyte",
+  cnidocyte_2                = "cnidocyte",
+  epidermis_1                = "epidermis",
+  epidermis_2                = "epidermis",
+  epidermis_3                = "epidermis",
+  epidermis_like             = "epidermis",
+  gastrodermis               = "gastrodermis",
+  gastrodermis_gland_like    = "gastrodermis",
+  gastrodermis_muscle        = "gastrodermis",
+  gastrodermis_alga_hosting  = "alga_hosting_cell",
+  gland_calicoblast_like     = "glands",
+  gland_secretory_1          = "glands",
+  gland_secretory_2          = "glands",
+  gland_secretory_3          = "glands",
+  gland_secretory_4          = "glands",
+  gland_secretory_5          = "glands",
+  neuron_Etv1                = "neuron",
+  neuron_Hmx                 = "neuron",
+  neuron_Pou4_1              = "neuron",
+  neuron_Pou4_2              = "neuron",
+  neuron_Pou4_3              = "neuron",
+  neuron_Pou4_4              = "neuron",
+  neurosecretory_progenitors = "neuron",
+  precursors                 = "neuron"
+)
+
+ryuma_map <- c(
+  "Algae_hosting_cells" = "alga_hosting_cell",
+  "Cnidocytes"          = "cnidocyte",
+  "Epidermis"           = "epidermis",
+  "Gastrodermis_1"      = "gastrodermis",
+  "Gastrodermis_2"      = "gastrodermis",
+  "Immune cells"        = "immune_cell",
+  "Neurons-like"        = "neuron",
+  "Neurons_1"           = "neuron",
+  "Neurons_2"           = "neuron",
+  "Unknown"             = "unknown"
+)
+```
+
+```{r apply-merges}
+ct_amil_m  <- merge_ct(ct_amil,  amil_map)
+ct_spis_m  <- merge_ct(ct_spis,  spis_map)
+ct_ocup_m  <- merge_ct(ct_ocup,  ocup_map)
+ct_gast_m  <- merge_ct(ct_gast,  gast_map)
+ct_nve_m   <- merge_ct(ct_nve,   nve_map)
+ct_xsp_m   <- merge_ct(ct_xsp,   xsp_map)
+ct_ryuma_m <- merge_ct(ct_ryuma, ryuma_map)
+```
+
+## Build pan-calicoblast centroid
+
+Each species' embeddings are **centred independently** before extracting
+calicoblast cells, so that species-level global biases do not contaminate the
+pan-calicoblast signal.
+
+```{r pan-calicoblast}
+centre <- function(emb) sweep(emb, 2, colMeans(emb))
+l2_norm_vec <- function(v) v / sqrt(sum(v^2))
+
+# Centre each species, then collect calicoblast cells
+cali_sources <- list(
+  Amil = list(emb = emb_amil, ct = ct_amil_m),
+  Spis = list(emb = emb_spis, ct = ct_spis_m),
+  Ocup = list(emb = emb_ocup, ct = ct_ocup_m),
+  Gast = list(emb = emb_gast, ct = ct_gast_m)
+)
+
+cali_pool <- do.call(rbind, lapply(names(cali_sources), function(sp) {
+  d   <- cali_sources[[sp]]
+  emb_c <- centre(d$emb)
+  n_cali <- sum(d$ct == "calicoblast")
+  cat(sprintf("%-5s : %d calicoblast cells\n", sp, n_cali))
+  emb_c[d$ct == "calicoblast", , drop = FALSE]
+}))
+
+cat(sprintf("\nTotal pooled calicoblast cells: %d\n", nrow(cali_pool)))
+
+# Pan-calicoblast centroid: mean of all pooled cells, L2-normalised
+pan_cali_centroid <- l2_norm_vec(colMeans(cali_pool))
+```
+
+## Helper: cell-type centroids for comparison species
+
+```{r helpers}
+mean_by_type_normed <- function(emb, labels) {
+  emb_c <- centre(emb)
+  types <- sort(unique(labels))
+  mat <- do.call(rbind, lapply(types, function(ct)
+    l2_norm_vec(colMeans(emb_c[labels == ct, , drop = FALSE]))))
+  rownames(mat) <- types
+  mat
+}
+
+# Species order: distant (no calicoblast) → close (has calicoblast)
+comp_order <- c("Xsp", "Nve", "Ryuma", "Spis", "Ocup", "Gast", "Amil")
+has_calicoblast <- c(Amil=TRUE, Spis=TRUE, Ocup=TRUE, Gast=TRUE,
+                     Ryuma=FALSE, Xsp=FALSE, Nve=FALSE)
+
+comp_centroids <- list(
+  Amil  = mean_by_type_normed(emb_amil,  ct_amil_m),
+  Spis  = mean_by_type_normed(emb_spis,  ct_spis_m),
+  Ocup  = mean_by_type_normed(emb_ocup,  ct_ocup_m),
+  Gast  = mean_by_type_normed(emb_gast,  ct_gast_m),
+  Ryuma = mean_by_type_normed(emb_ryuma, ct_ryuma_m),
+  Xsp   = mean_by_type_normed(emb_xsp,   ct_xsp_m),
+  Nve   = mean_by_type_normed(emb_nve,   ct_nve_m)
+)
+```
+
+## Cosine similarity: pan-calicoblast vs. each species
+
+```{r compute-sim}
+sim_df <- do.call(rbind, lapply(comp_order, function(sp) {
+  centroids <- comp_centroids[[sp]]
+  sims      <- as.numeric(centroids %*% pan_cali_centroid)
+  data.frame(
+    species    = sp,
+    cell_type  = rownames(centroids),
+    similarity = sims,
+    is_cali    = rownames(centroids) == "calicoblast",
+    has_cali   = has_calicoblast[sp],
+    stringsAsFactors = FALSE
+  )
+}))
+
+sim_df$species <- factor(sim_df$species, levels = comp_order)
+```
+
+## Visualisation
+
+### Bar plots: pan-calicoblast similarity per species
+
+```{r barplots, fig.width = 12, fig.height = 7}
+ggplot(sim_df,
+       aes(x = reorder(cell_type, similarity), y = similarity, fill = is_cali)) +
+  geom_col() +
+  geom_hline(yintercept = 0, linewidth = 0.3, colour = "grey40") +
+  scale_fill_manual(values = c("FALSE" = "steelblue", "TRUE" = "firebrick"),
+                    labels = c("FALSE" = "other", "TRUE" = "calicoblast"),
+                    name = "Cell type") +
+  facet_wrap(~ species, nrow = 2, scales = "free_x") +
+  coord_flip() +
+  labs(x = NULL, y = "Cosine similarity to pan-calicoblast centroid",
+       title = "Pan-calicoblast cosine similarity vs. each cell type",
+       subtitle = "Species order: Scleractinia → Corallimorpharia → Octocorallia → Actiniaria\nRed = calicoblast (if annotated in that species)") +
+  theme_classic(base_size = 11) +
+  theme(strip.background = element_blank(),
+        strip.text = element_text(face = "bold"))
+```
+
+### Heatmap: all species × merged cell types
+
+```{r heatmap, fig.width = 10, fig.height = 5}
+merged_type_order <- c(
+  "calicoblast", "epidermis", "gastrodermis", "alga_hosting_cell",
+  "digestive_filaments", "glands", "immune_cell", "cnidocyte",
+  "neuron", "germline", "unknown"
+)
+
+# Long-format data for ggplot heatmap
+heat_df <- do.call(rbind, lapply(comp_order, function(sp) {
+  d <- sim_df[sim_df$species == sp, ]
+  data.frame(
+    species   = sp,
+    cell_type = merged_type_order,
+    similarity = heat_mat[sp, merged_type_order],   # NA if absent
+    stringsAsFactors = FALSE
+  )
+}))
+
+# Build the full matrix for NA lookup (constructed above in the loop)
+heat_mat <- matrix(
+  NA_real_,
+  nrow = length(comp_order),
+  ncol = length(merged_type_order),
+  dimnames = list(comp_order, merged_type_order)
+)
+for (sp in comp_order) {
+  d <- sim_df[sim_df$species == sp, ]
+  present <- intersect(d$cell_type, merged_type_order)
+  heat_mat[sp, present] <- d$similarity[match(present, d$cell_type)]
+}
+
+heat_df <- do.call(rbind, lapply(comp_order, function(sp) {
+  data.frame(
+    species    = sp,
+    cell_type  = merged_type_order,
+    similarity = heat_mat[sp, merged_type_order],
+    stringsAsFactors = FALSE
+  )
+}))
+heat_df$species   <- factor(heat_df$species,   levels = comp_order)
+heat_df$cell_type <- factor(heat_df$cell_type, levels = merged_type_order)
+heat_df$is_na     <- is.na(heat_df$similarity)
+
+# Species row label: mark those with calicoblast
+sp_label_map <- setNames(
+  ifelse(has_calicoblast[comp_order], paste0(comp_order, "*"), comp_order),
+  comp_order
+)
+heat_df$sp_label <- factor(sp_label_map[as.character(heat_df$species)],
+                            levels = sp_label_map[comp_order])
+
+ggplot(heat_df, aes(x = cell_type, y = sp_label)) +
+  geom_tile(aes(fill = similarity), colour = "white", linewidth = 0.5) +
+#  geom_text(data = heat_df[!heat_df$is_na, ],
+#            aes(label = sprintf("%.2f", similarity)),
+#            size = 2.8, colour = "black") +
+  scale_fill_gradientn(
+    colours = colorRampPalette(c("navy", "white", "firebrick"))(100),
+    limits  = c(-0.4, 0.4), oob = scales::squish,
+    name    = "Cosine\nsimilarity", na.value = "grey"
+  ) +
+  scale_x_discrete(position = "top") +
+  labs(x = NULL, y = NULL,
+       title = "Pan-calicoblast cosine similarity",
+       subtitle = "* = species has calicoblast annotation") +
+  theme_classic(base_size = 11) +
+  theme(axis.text.x = element_text(angle = 90, hjust = 0),
+        axis.ticks   = element_blank(),
+        panel.border = element_rect(colour = "grey", fill = NA))
+```
+
+### Top-matching cell type per species
+
+```{r top-match, fig.width = 8, fig.height = 4}
+top_df <- sim_df %>%
+  group_by(species) %>%
+  slice_max(similarity, n = 1) %>%
+  ungroup() %>%
+  mutate(label = sprintf("%s\n(%.2f)", cell_type, similarity))
+
+ggplot(top_df, aes(x = species, y = similarity, fill = cell_type)) +
+  geom_col(width = 0.6) +
+  geom_text(aes(label = label), vjust = -0.3, size = 3.2) +
+  scale_fill_brewer(palette = "Set2", name = "Top cell type") +
+  scale_y_continuous(limits = c(0, max(top_df$similarity) * 1.25),
+                     name = "Cosine similarity") +
+  labs(x = "Comparison species",
+       title = "Highest-similarity cell type to pan-calicoblast centroid per species") +
+  theme_classic(base_size = 12) +
+  theme(axis.text.x = element_text(angle = 20, hjust = 1))
+```

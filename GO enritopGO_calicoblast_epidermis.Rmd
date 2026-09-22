@@ -1,0 +1,432 @@
+---
+title: "GO enrichment (topGO) — Calicoblast & Epidermis"
+---
+
+```{r libraries}
+library(topGO)
+library(GO.db)
+library(AnnotationDbi)
+library(ggplot2)
+library(dplyr)
+library(tidyr)
+library(patchwork)
+```
+
+---
+
+## Parameters
+
+```{r params}
+# GO ontology: "BP", "MF", or "CC"
+ONTOLOGY <- "MF"
+
+# topGO algorithm: "weight01" (topology-aware, recommended) or "classic"
+ALGORITHM <- "weight01"
+
+# p-value cutoff (topGO weight01 p-values are not BH-corrected by design;
+# the weight01 algorithm itself penalises redundant parent terms)
+P_CUT  <- 0.05
+N_TOP  <- 10   # top terms per bar panel
+
+# Directories
+eggnog_coral_dir <- "/eggNOG"
+marker_dir       <- "/calicoblast_markers"
+out_dir          <- "/eggnog"
+
+dir.create(out_dir, showWarnings = FALSE, recursive = TRUE)
+
+species    <- c("Amil", "Spis", "Ocupat", "Gast")
+cell_types <- c("calico", "epidermis")
+```
+
+---
+
+## 1. Parse eggNOG annotation files
+
+```{r parse-eggnog}
+parse_eggnog <- function(path) {
+  df <- read.table(
+    path, sep = "\t", comment.char = "#",
+    header = FALSE, stringsAsFactors = FALSE, quote = ""
+  )
+  df <- df[, c(1, 10)]
+  colnames(df) <- c("query", "GOs")
+  df[df$GOs != "-", ]
+}
+
+eggnog_raw <- list(
+  Amil   = parse_eggnog(file.path(eggnog_coral_dir, "Amil_long.emapper.annotations")),
+  Spis   = parse_eggnog(file.path(eggnog_coral_dir, "Spis_long.emapper.annotations")),
+  Ocupat = parse_eggnog(file.path(eggnog_coral_dir, "Ocupat_long.emapper.annotations")),
+  Gast   = parse_eggnog(file.path(eggnog_gast_dir,  "Gast.emapper.annotations"))
+)
+
+cat("Annotated genes per species:\n")
+for (sp in species) cat(" ", sp, ":", nrow(eggnog_raw[[sp]]), "\n")
+```
+
+---
+
+## 2. Build gene2GO lists (topGO format)
+
+topGO requires a **named list**: `gene_id → character vector of GO IDs`.
+Annotations are provided as direct (leaf) terms only — topGO propagates them
+up the DAG internally.
+
+```{r gene2go}
+build_gene2go <- function(eggnog_df, sp) {
+  # Strip isoform suffixes so IDs match marker gene format
+  if (sp == "Amil")   eggnog_df$query <- sub("-RA$",  "", eggnog_df$query)
+
+  go_list <- strsplit(eggnog_df$GOs, ",")
+  names(go_list) <- eggnog_df$query
+  go_list
+}
+
+gene2go_list <- lapply(setNames(species, species), function(sp) {
+  build_gene2go(eggnog_raw[[sp]], sp)
+})
+
+cat("Universe size per species (genes with any GO annotation):\n")
+for (sp in species) cat(" ", sp, ":", length(gene2go_list[[sp]]), "\n")
+```
+
+---
+
+## 3. Load marker genes
+
+```{r load-markers}
+# Convert marker gene IDs to the same format as the eggnog query IDs
+marker_to_eggnog <- function(genes, sp) {
+  genes <- genes[!grepl("orphan", genes, ignore.case = TRUE)]
+
+  if (sp == "Gast") {
+    # g.TRINITY-GG-207-c43-g1-i1  →  TRINITY_GG_207_c43_g1_i1
+    sub("^g\\.", "", gsub("-", "_", genes))
+  } else if (sp == "Amil") {
+    # Amil-Amillepora15760  →  Amil_Amillepora15760  (matches after -RA strip)
+    gsub("-", "_", genes)
+  } else if (sp == "Ocupat") {
+    # Ocupat-v02-G022773  →  Ocupat_v02_G022773.t0
+    paste0(gsub("-", "_", genes), ".t0")
+  } else {
+    # Spis-XP-022803870-1  →  Spis_XP_022803870_1
+    gsub("-", "_", genes)
+  }
+}
+
+epidermis_dir <- "/home/tosuke/work/Coral/Corallimorpharia/GO/R/output_epidermis_markers"
+
+load_markers <- function(sp, ct) {
+  if (ct == "calico") {
+    path <- switch(sp,
+      Amil   = file.path(marker_dir,    "Amil_calicoblast_markers.tsv"),
+      Spis   = file.path(marker_dir,    "Spis_calicoblast_markers.tsv"),
+      Ocupat = file.path(marker_dir,    "Ocupat_calicoblast_markers.tsv"),
+      Gast   = file.path(marker_dir,    "Gast_calicoblast_markers.tsv")
+    )
+  } else {
+    path <- switch(sp,
+      Amil   = file.path(epidermis_dir, "Amil_epidermis_markers.tsv"),
+      Spis   = file.path(epidermis_dir, "Spis_epidermis_markers.tsv"),
+      Ocupat = file.path(epidermis_dir, "Ocupat_epidermis_markers.tsv"),
+      Gast   = file.path(epidermis_dir, "Gast_epidermis_markers.tsv")
+    )
+  }
+  df    <- read.table(path, sep = "\t", header = TRUE, stringsAsFactors = FALSE)
+  genes <- df$gene
+  marker_to_eggnog(genes, sp)
+}
+
+cat("Marker gene counts (after ID conversion):\n")
+marker_list <- list()
+for (sp in species) {
+  for (ct in cell_types) {
+    key <- paste(sp, ct, sep = "_")
+    m   <- load_markers(sp, ct)
+    marker_list[[key]] <- m
+    cat(" ", key, ":", length(m), "\n")
+  }
+}
+```
+
+---
+
+## 4. Run topGO enrichment
+
+```{r topgo-fn}
+run_topgo <- function(sp, ct) {
+  key      <- paste(sp, ct, sep = "_")
+  markers  <- marker_list[[key]]
+  gene2go  <- gene2go_list[[sp]]
+  all_genes <- names(gene2go)
+
+  # Gene score vector: 1 = marker, 0 = not
+  gene_scores <- factor(as.integer(all_genes %in% markers))
+  names(gene_scores) <- all_genes
+
+  n_sig <- sum(gene_scores == 1)
+  if (n_sig < 3) {
+    message(key, ": only ", n_sig, " markers in universe — skipping")
+    return(NULL)
+  }
+
+  # Build topGOdata object
+  go_data <- tryCatch(
+    new("topGOdata",
+        ontology  = ONTOLOGY,
+        allGenes  = gene_scores,
+        geneSel   = function(x) x == 1,
+        annot     = annFUN.gene2GO,
+        gene2GO   = gene2go,
+        nodeSize  = 3          # minimum GO term size
+    ),
+    error = function(e) { message(key, " topGOdata error: ", e$message); NULL }
+  )
+  if (is.null(go_data)) return(NULL)
+
+  # Run test
+  test_result <- runTest(go_data, algorithm = ALGORITHM, statistic = "fisher")
+
+  # Extract top results
+  n_terms <- length(score(test_result))
+  if (n_terms == 0) { message(key, ": no terms tested"); return(NULL) }
+
+  tbl <- GenTable(
+    go_data,
+    pvalue   = test_result,
+    orderBy  = "pvalue",
+    topNodes = min(n_terms, 200),
+    numChar  = 100
+  )
+
+  # GenTable returns p-values as character (e.g. "< 1e-30"); parse them
+  tbl$pvalue <- as.numeric(sub("< ", "", tbl$pvalue))
+
+  tbl <- tbl %>%
+    filter(pvalue < P_CUT) %>%
+    mutate(
+      species   = sp,
+      cell_type = ct,
+      logP      = -log10(pvalue),
+      Count     = Significant
+    )
+
+  if (nrow(tbl) == 0) { message(key, ": no terms pass p < ", P_CUT); return(NULL) }
+
+  tbl
+}
+
+enrich_results <- lapply(species, function(sp) {
+  lapply(cell_types, function(ct) run_topgo(sp, ct))
+})
+names(enrich_results) <- species
+for (sp in species) names(enrich_results[[sp]]) <- cell_types
+
+cat("\nSignificant terms per species/cell type:\n")
+for (sp in species)
+  for (ct in cell_types) {
+    r <- enrich_results[[sp]][[ct]]
+    cat(" ", sp, ct, ":", if (is.null(r)) "0" else nrow(r), "terms\n")
+  }
+```
+
+---
+
+## 5. Bar plots
+
+```{r plot-fn}
+clean_term <- function(term, width = 30) {
+  lines <- strwrap(term, width = width)
+  if (length(lines) > 2) paste0(paste(lines[1:2], collapse = "\n"), "...") else paste(lines, collapse = "\n")
+}
+
+truncate_term <- function(term, maxchar = 60) {
+  ifelse(nchar(term) > maxchar, paste0(substr(term, 1, maxchar - 3), "..."), term)
+}
+
+make_bar <- function(sp, ct, n_top = N_TOP) {
+  df <- enrich_results[[sp]][[ct]]
+
+  if (is.null(df) || nrow(df) == 0) {
+    return(
+      ggplot() +
+        annotate("text", x = 0.5, y = 0.5, label = "No enriched terms", size = 3) +
+        theme_void() +
+        labs(title = paste0(sp, " — ", ct))
+    )
+  }
+
+  df <- df %>%
+    slice_min(order_by = pvalue, n = n_top, with_ties = FALSE) %>%
+    mutate(
+      Term = sapply(Term, clean_term),
+      Term = reorder(Term, logP)
+    )
+
+  x_max <- max(df$logP) * 1.25
+
+  ggplot(df, aes(x = logP, y = Term)) +
+    geom_col(fill = "white", color = "black", width = 0.65) +
+    geom_text(aes(label = paste0("(", Count, ")")),
+              hjust = -0.1, size = 2.8, colour = "black") +
+    labs(
+      title = paste0(sp, " — ", ct),
+      x     = expression(-log[10](p-value)),
+      y     = NULL
+    ) +
+    scale_x_continuous(expand = c(0, 0), limits = c(0, x_max)) +
+    theme(
+      panel.grid        = element_blank(),
+      panel.background  = element_blank(),
+      plot.background   = element_blank(),
+      axis.line         = element_line(color = "black"),
+      panel.border      = element_blank(),
+      plot.title        = element_text(size = 10, face = "bold", colour = "black"),
+      axis.text.y       = element_text(size = 8, colour = "black"),
+      axis.text.x       = element_text(size = 8, colour = "black"),
+      axis.title.x      = element_text(size = 8, colour = "black")
+    )
+}
+```
+
+### Bar plots: rows = species, columns = calicoblast | epidermis
+
+```{r bar-grid, fig.width=8, fig.height=12}
+plots <- lapply(species, function(sp) lapply(cell_types, function(ct) make_bar(sp, ct)))
+
+bar_grid <- wrap_plots(
+  plots[[1]][[1]], plots[[1]][[2]],
+  plots[[2]][[1]], plots[[2]][[2]],
+  plots[[3]][[1]], plots[[3]][[2]],
+  plots[[4]][[1]], plots[[4]][[2]],
+  ncol = 2
+)
+bar_grid
+```
+
+---
+
+## 6. Bubble plots
+
+```{r combine-results}
+df_all <- do.call(rbind, lapply(species, function(sp) {
+  do.call(rbind, lapply(cell_types, function(ct) enrich_results[[sp]][[ct]]))
+}))
+```
+
+```{r bubble-fn}
+make_bubble <- function(df, sp_levels, title_suffix = "") {
+  if (is.null(df) || nrow(df) == 0)
+    return(ggplot() + annotate("text", 0.5, 0.5, label = "No data") + theme_void())
+
+  top_terms <- df %>%
+    filter(species %in% sp_levels) %>%
+    group_by(species, cell_type) %>%
+    slice_min(pvalue, n = N_TOP, with_ties = FALSE) %>%
+    ungroup() %>%
+    pull(Term) %>%
+    unique()
+
+  plot_df <- df %>%
+    filter(species %in% sp_levels, Term %in% top_terms) %>%
+    mutate(
+      Term      = truncate_term(Term),
+      species   = factor(species,   levels = sp_levels),
+      cell_type = factor(cell_type, levels = cell_types),
+      logP      = -log10(pvalue)
+    )
+
+  term_mat <- plot_df %>%
+    mutate(col_key = paste(species, cell_type, sep = "_")) %>%
+    dplyr::select(Term, col_key, logP) %>%
+    pivot_wider(names_from = col_key, values_from = logP,
+                values_fill = 0, values_fn = max) %>%
+    tibble::column_to_rownames("Term")
+
+  if (nrow(term_mat) > 1) {
+    hc         <- hclust(dist(term_mat))
+    term_order <- rev(rownames(term_mat)[hc$order])
+  } else {
+    term_order <- rownames(term_mat)
+  }
+
+  plot_df$Term <- factor(plot_df$Term, levels = term_order)
+
+  ggplot(plot_df, aes(x = species, y = Term, size = Count, fill = logP)) +
+    geom_point(shape = 21, colour = "black") +
+    scale_size_continuous(name = "Gene count", range = c(2, 8)) +
+    scale_fill_gradient(
+      name = expression(-log[10](p)),
+      low = "white", high = "navy"
+    ) +
+    facet_grid(~ cell_type) +
+    labs(x = NULL, y = NULL,
+         title = paste0("GO enrichment (topGO ", ALGORITHM, ") — ", ONTOLOGY, title_suffix)) +
+    theme_bw() +
+    theme(
+      axis.text.x      = element_text(size = 6, colour = "black", hjust = 0.5),
+      axis.text.y      = element_text(size = 6, colour = "black"),
+      axis.ticks       = element_line(colour = "black"),
+      strip.text       = element_text(size = 6, face = "bold", colour = "black"),
+      strip.background = element_rect(fill = "grey92", colour = "black"),
+      legend.text      = element_text(size = 6, colour = "black"),
+      legend.title     = element_text(size = 6, colour = "black"),
+      panel.grid.major = element_line(colour = "grey90"),
+      panel.grid.minor = element_blank(),
+      plot.title       = element_text(size = 6, face = "bold")
+    )
+}
+```
+
+### Bubble plot: all species
+
+```{r bubble-all, fig.width=7, fig.height=13}
+bubble_all <- make_bubble(df_all, c("Spis", "Ocupat", "Gast", "Amil"))
+bubble_all
+```
+
+### Bubble plot: corals only (without Gast)
+
+```{r bubble-no-gast, fig.width=7, fig.height=12}
+bubble_no_gast <- make_bubble(df_all, c("Spis", "Ocupat", "Amil"), " (corals only)")
+bubble_no_gast
+```
+
+---
+
+## 7. Save outputs
+
+```{r save}
+pdf_bar <- file.path(out_dir, paste0("GO_topGO_", ONTOLOGY, "_bar.pdf"))
+pdf(pdf_bar, width = 8, height = 12)
+print(bar_grid)
+dev.off()
+cat("Saved:", pdf_bar, "\n")
+
+pdf_bubble_all <- file.path(out_dir, paste0("GO_topGO_", ONTOLOGY, "_bubble_all.pdf"))
+pdf(pdf_bubble_all, width = 7, height = 13)
+print(bubble_all)
+dev.off()
+cat("Saved:", pdf_bubble_all, "\n")
+
+pdf_bubble_ng <- file.path(out_dir, paste0("GO_topGO_", ONTOLOGY, "_bubble_corals.pdf"))
+pdf(pdf_bubble_ng, width = 8, height = 10)
+print(bubble_no_gast)
+dev.off()
+cat("Saved:", pdf_bubble_ng, "\n")
+
+if (!is.null(df_all) && nrow(df_all) > 0) {
+  csv_path <- file.path(out_dir, paste0("GO_topGO_", ONTOLOGY, "_results.csv"))
+  write.csv(df_all, csv_path, row.names = FALSE)
+  cat("Saved:", csv_path, "\n")
+}
+```
+
+---
+
+## Session info
+
+```{r session}
+sessionInfo()
+```

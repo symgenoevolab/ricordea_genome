@@ -5,8 +5,8 @@ title: "TranscryptFormer: pan-calicoblast cosine similarity"
 ## Concept
 
 Calicoblast cells from all species that carry this annotation (Amil, Spis, Ocup,
-Gast) are pooled after per-species centering. The mean L2-normalised vector of
-this pool is the **pan-calicoblast centroid**. We then compute its cosine
+Gast) are pooled after per-species centring. The mean L2-normalised vector of
+this pool is the pan-calicoblast centroid. We then compute its cosine
 similarity against every cell-type centroid in every comparison species.
 
 A high similarity to a specific cell type in a non-skeletal species suggests a

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Convert a Seurat v4/v5 RDS file to h5ad for TranscriptFormer inference.
+"""Convert Seurat v4/v5 RDS file to h5ad for TranscriptFormer inference.
 
 Usage:
     python rds_to_h5ad.py <input.rds> <output.h5ad> [--species gast|ryuma]

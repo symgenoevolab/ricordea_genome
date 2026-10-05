@@ -23,4 +23,4 @@ R file:
   
 Reference:
 
-XXXXX
+Lewin TD, Sakagami T, Piñon-Gonzalez VM, Yoshioka Y, Kao LJ, Chiu YL, Sasaki K, Chen YH, Li JY, Tin KX, Lu MYJ, Miller DJ, Shikina S, Lin MF, Luo YJ (2026) Corallimorpharian genome supports the monophyly of Scleractinia and illuminates the cellular evolution of coral calcification. bioRxiv 2026.09.25.754439. https://doi.org/10.64898/2026.09.25.754439
